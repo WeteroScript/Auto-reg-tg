@@ -1,0 +1,6 @@
+aiogram>=3.0
+telethon
+aiohttp
+beautifulsoup4
+lxml
+python-dotenv
