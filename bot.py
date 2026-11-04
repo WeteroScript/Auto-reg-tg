@@ -1,4 +1,4 @@
-# language: Python, file: bot.py, target: aiogram 3.x + Telethon (bothost-ready)
+# language: Python, file: bot.py, target: aiogram 3.x + Telethon
 # pip install aiogram telethon aiohttp beautifulsoup4 lxml python-dotenv
 
 import asyncio
@@ -52,13 +52,11 @@ AUTHORIZED_FILE = DATA_DIR / "authorized.json"
 STATS_FILE = DATA_DIR / "stats.json"
 DEAD_FILE = DATA_DIR / "dead_numbers.json"
 
-# ── 7 рабочих сайтов ──────────────────────────────────────────────────────
+# ── рабочие сайты (без капчи) ─────────────────────────────────────────────
 SITES: list[tuple[str, str]] = [
     ("asms.ai", "https://asms.ai/"),
     ("SMSToMe", "https://smstome.com/"),
-    ("Temporary-Phone-Number", "https://temporary-phone-number.com/"),
     ("receive-smss", "https://receive-smss.com/"),
-    ("FreePhoneNum", "https://freephonenum.com/"),
     ("TempNumber", "https://temp-number.com/"),
     ("Receive-SMS.io", "https://receive-sms.io/"),
     ("Receive-SMS-Free", "https://receive-sms-free.cc/"),
@@ -76,7 +74,7 @@ IN_FLIGHT_PHONES: set[str] = set()
 LAST_SEEN_PHONE: dict[str, str] = {}
 SITE_LOCKS: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name, _ in SITES}
 
-# ── переводы (сокращенно) ─────────────────────────────────────────────────
+# ── переводы ──────────────────────────────────────────────────────────────
 TRANSLATIONS = {
     "ru": {
         "enter_password": "🔐 <b>Добро пожаловать!</b>\n\nВведите пароль для доступа к панели:",
@@ -212,53 +210,44 @@ def parse_age_hours(text: str) -> float:
 def extract_phone_and_url(html: str) -> tuple[str | None, str | None]:
     soup = BeautifulSoup(html, "lxml")
     
-    # 1. FreePhoneNum
-    if "FreePhoneNum" in html or "Copy number" in html:
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if re.search(r"/\d{7,12}$", href) or "/sms/" in href or "/numbers/" in href:
-                txt = a.get_text(" ", strip=True)
-                m = STRICT_PHONE_RE.search(txt) or STRICT_PHONE_RE.search(href)
+    # --- ТОЧЕЧНЫЙ ПАРСЕР ДЛЯ SMSTOME.COM ---
+    if "smstome.com" in html or "SMS TOME" in html:
+        for card in soup.find_all("div", class_=re.compile("card|number-card|list-group-item")):
+            text = card.get_text(" ", strip=True)
+            if "Finland" in text or "Netherlands" in text or "Belgium" in text:
+                m = STRICT_PHONE_RE.search(text)
                 if m:
-                    p = normalize_phone(m.group(0))
-                    if p: return p, href
+                    phone = normalize_phone(m.group(0))
+                    if phone:
+                        link = card.find("a", href=True)
+                        if link and "/sms/" in link["href"]:
+                            return phone, link["href"]
+        # Если карточки нет, ищем просто ссылки вида /sms/358...
+        for a in soup.find_all("a", href=True):
+            if "/sms/" in a["href"] and re.search(r"\+?\d{9,15}", a["href"]):
+                m = STRICT_PHONE_RE.search(a.text)
+                if m:
+                    return normalize_phone(m.group(0)), a["href"]
 
-    # 2. receive-smss.com
-    for card in soup.find_all(["div", "article", "li"]):
-        text = card.get_text(" ", strip=True)
-        if "United States" in text or "United Kingdom" in text:
-            m = STRICT_PHONE_RE.search(text)
-            if m:
-                phone = normalize_phone(m.group(0))
-                if phone:
-                    link = card.find("a", string=re.compile("Open", re.I))
-                    if link: return phone, link.get("href")
-                    return phone, None
+    # --- ТОЧЕЧНЫЙ ПАРСЕР ДЛЯ RECEIVE-SMS-FREE.CC ---
+    if "receive-sms-free" in html:
+        for a in soup.find_all("a", href=True):
+            if "?id=" in a["href"] or "/sms/" in a["href"]:
+                m = STRICT_PHONE_RE.search(a.text)
+                if m:
+                    phone = normalize_phone(m.group(0))
+                    if phone:
+                        return phone, a["href"]
+        # Иногда номер лежит в тексте карточки без ссылки
+        for div in soup.find_all("div", class_=re.compile("card|number|phone")):
+            text = div.get_text(" ", strip=True)
+            if "Online" in text:
+                m = STRICT_PHONE_RE.search(text)
+                if m:
+                    phone = normalize_phone(m.group(0))
+                    if phone: return phone, None
 
-    # 3. Receive-SMS.io, SMSToMe, TempNumber
-    for card in soup.find_all(["div", "article", "li"]):
-        text = card.get_text(" ", strip=True)
-        if "UK" in text or "United Kingdom" in text or "GB" in text or "+44" in text:
-            continue
-        if "USA" in text or "Finland" in text or "Belgium" in text or "Netherlands" in text or "Poland" in text or "Canada" in text or "Fi" in text:
-            age_hours = 9999
-            time_match = re.search(r"Added:\s*([^|]+)|Added\s+(\d+\s+\w+\s+ago)", text, re.I)
-            if time_match:
-                age_str = time_match.group(1) or time_match.group(2)
-                age_hours = parse_age_hours(age_str)
-            elif "recently" in text.lower(): age_hours = 0.1
-            
-            if age_hours > MAX_NUMBER_AGE_HOURS: continue
-                
-            m = STRICT_PHONE_RE.search(text)
-            if m:
-                phone = normalize_phone(m.group(0))
-                if phone:
-                    link = card.find("a", href=True)
-                    href = link["href"] if link else None
-                    return phone, href
-
-    # 4. Универсальный фолбэк (asms.ai, Temporary-Phone-Number)
+    # --- УНИВЕРСАЛЬНЫЙ ПАРСЕР (asms.ai, receive-smss, temp-number, receive-sms.io) ---
     for a in soup.find_all("a", href=True):
         href = a["href"]
         if any(x in href for x in ("/number/", "/sms/", "/inbox/")):
@@ -289,24 +278,14 @@ def snapshot_page(html: str) -> str:
 def extract_code_from_sms_block(html: str) -> str | None:
     soup = BeautifulSoup(html, "lxml")
     
-    # FreePhoneNum: кнопка Copy code
-    for btn in soup.find_all(string=re.compile("Copy code", re.I)):
-        parent = btn.parent.parent
-        if parent:
-            text = parent.get_text(" ", strip=True).replace("Copy code", "")
-            m = re.search(r"\b(\d{5,6})\b", text)
+    # --- SMSTOME & RECEIVE-SMS-FREE: ищем в блоках с сообщениями ---
+    for div in soup.find_all(["div", "tr", "li"], class_=re.compile("message|sms|msg|text")):
+        txt = div.get_text(" ", strip=True)
+        if "telegram" in txt.lower() or "код" in txt.lower():
+            m = re.search(r"\b(\d{5,6})\b", txt)
             if m: return m.group(1)
 
-    # receive-smss.com: блоки Message/Sender
-    for div in soup.find_all(["div", "li", "tr"]):
-        text = div.get_text(" ", strip=True)
-        if "Message" in text and "Sender" in text and "telegram" in text.lower():
-            m = re.search(r"\b(\d{3}[- ]?\d{3})\b|\b(\d{5,6})\b", text)
-            if m:
-                code = m.group(1) or m.group(2)
-                return code.replace("-", "").replace(" ", "")
-
-    # Универсальный
+    # --- Универсальный ---
     for selector in ("[class*=sms]", "[class*=message]", "[class*=inbox]", "[class*=msg]", "[class*=text]", "tr", "li"):
         for el in soup.select(selector):
             txt = el.get_text(" ", strip=True)
@@ -364,7 +343,7 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot
 
         phone, phone_page = extract_phone_and_url(html)
         if not phone:
-            log_event("warn", f"{name}: номер не найден или все старше 5 часов")
+            log_event("warn", f"{name}: номер не найден")
             return None
 
         if LAST_SEEN_PHONE.get(name) == phone:
@@ -389,7 +368,7 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot
             page_html = await fetch_html(session, phone_page)
             if page_html: html = page_html
             else: 
-                log_event("warn", f"{name}: страница номера не загрузилась (битая ссылка), скип")
+                log_event("warn", f"{name}: страница номера не загрузилась, скип")
                 return None
 
         IN_FLIGHT_PHONES.add(phone)
