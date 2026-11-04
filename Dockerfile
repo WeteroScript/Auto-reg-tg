@@ -25,8 +25,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Установка Chromium и его зависимостей
-RUN playwright install --with-deps chromium
+# Установка ОБОИХ бинарников: полного Chromium и headless-shell
+RUN playwright install --with-deps chromium chromium-headless-shell
 
 COPY . .
 
