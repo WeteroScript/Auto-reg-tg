@@ -1,6 +1,6 @@
 aiogram>=3.0
 telethon
-aiohttp
+playwright
 beautifulsoup4
 lxml
 python-dotenv
