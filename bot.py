@@ -67,14 +67,14 @@ SMS_POLL_INTERVAL = 5
 MAX_CONCURRENT_SITES = 5
 WORKER_SLEEP_BETWEEN = 2
 FLOOD_THRESHOLD = 3600
-MAX_NUMBER_AGE_HOURS = 5  # Максимальный возраст номера (в часах) для Receive-SMS.io
+MAX_NUMBER_AGE_HOURS = 5
 
 REGISTRATION_TASKS: dict[int, asyncio.Task] = {}
 IN_FLIGHT_PHONES: set[str] = set()
 LAST_SEEN_PHONE: dict[str, str] = {}
 SITE_LOCKS: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name, _ in SITES}
 
-# ── переводы (сокращенно для экономии места) ──────────────────────────────
+# ── переводы ──────────────────────────────────────────────────────────────
 TRANSLATIONS = {
     "ru": {
         "enter_password": "🔐 <b>Добро пожаловать!</b>\n\nВведите пароль для доступа к панели:",
@@ -242,7 +242,6 @@ def normalize_phone(raw: str) -> str | None:
     return "+" + digits
 
 def parse_age_hours(text: str) -> float:
-    """Парсит '5 days ago', '3 hours ago', 'recently' в часы."""
     t = text.lower()
     if "recently" in t or "just now" in t or "minute" in t: return 0.1
     match = re.search(r"(\d+)\s*(day|hour|minute|min)", t)
@@ -252,12 +251,11 @@ def parse_age_hours(text: str) -> float:
         if "day" in unit: return val * 24
         if "hour" in unit or unit == "h": return val
         if "minute" in unit or unit == "min": return val / 60
-    return 9999  # Если не распознали, считаем старым
+    return 9999
 
 def extract_phone_and_url(html: str) -> tuple[str | None, str | None]:
     soup = BeautifulSoup(html, "lxml")
     
-    # 1. Специфично для Receive-SMS.io (карточки с номерами и временем)
     for card in soup.find_all(["div", "article", "li"]):
         text = card.get_text(" ", strip=True)
         if "USA" in text or "UK" in text or "Finland" in text:
@@ -268,7 +266,6 @@ def extract_phone_and_url(html: str) -> tuple[str | None, str | None]:
             elif "recently" in text.lower():
                 age_hours = 0.1
             
-            # Если номер старше 5 часов — пропускаем
             if age_hours > MAX_NUMBER_AGE_HOURS:
                 continue
                 
@@ -276,12 +273,10 @@ def extract_phone_and_url(html: str) -> tuple[str | None, str | None]:
             if m:
                 phone = normalize_phone(m.group(0))
                 if phone:
-                    # Ищем кнопку Open или ссылку
                     link = card.find("a", href=True)
                     href = link["href"] if link else None
                     return phone, href
 
-    # 2. Специфично для SMSReceive.live (кнопка View SMS)
     for card in soup.find_all(["div", "article", "li"]):
         text = card.get_text(" ", strip=True)
         if "View SMS" in text or "United Kingdom" in text:
@@ -291,11 +286,9 @@ def extract_phone_and_url(html: str) -> tuple[str | None, str | None]:
                 if phone:
                     link = card.find("a", href=True)
                     if link: return phone, link["href"]
-                    # если кнопка не ссылка, возможно, ссылка есть на родителе
                     parent_link = card.find_parent("a")
                     if parent_link: return phone, parent_link["href"]
 
-    # 3. Универсальный фолбэк (asms.ai, Receive-SMS.cc)
     for a in soup.find_all("a", href=True):
         href = a["href"]
         if any(x in href for x in ("/number/", "/sms/", "/inbox/")):
@@ -403,7 +396,6 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot
             log_event("info", f"{name}: номер {phone} уже зарегистрирован")
             return None
 
-        # Переход на страницу номера
         if phone_page:
             if not phone_page.startswith("http"): phone_page = urljoin(url, phone_page)
             log_event("info", f"{name}: страница номера {phone_page}")
@@ -411,7 +403,7 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot
             if page_html: html = page_html
             else: 
                 log_event("warn", f"{name}: страница номера не загрузилась (битая ссылка), скип")
-                return None  # <--- СКИП БИТЫХ НОМЕРОВ
+                return None
 
         IN_FLIGHT_PHONES.add(phone)
         log_event("info", f"{name}: номер {phone}")
@@ -419,6 +411,10 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot
         baseline = snapshot_page(html)
         session_file = f"data/session_{phone.lstrip('+')}"
         client = TelegramClient(session_file, TG_API_ID, TG_API_HASH)
+        
+        # Флаг успеха
+        is_success = False
+        
         try:
             await client.connect()
             await client.send_code_request(phone)
@@ -447,6 +443,8 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot
                 log_event("warn", f"{name}: 2FA не установлен — {type(e).__name__}: {e}")
                 pwd_2fa = None
 
+            is_success = True  # <--- УСПЕХ, СЕССИЮ НЕ УДАЛЯЕМ
+            
             log_event("success", f"{name}: аккаунт создан id={me.id} phone={phone}")
             increment_stat("accounts_created")
             add_account(phone, session_file, pwd_2fa)
@@ -492,8 +490,19 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot
         except Exception as e:
             log_event("error", f"{name}: {type(e).__name__}: {e}")
         finally:
-            try: await client.disconnect()
-            except Exception: pass
+            try: 
+                await client.disconnect()
+            except Exception: 
+                pass
+            
+            # Автоудаление мусорного файла сессии
+            if not is_success:
+                session_path = Path(f"{session_file}.session")
+                if session_path.exists():
+                    try:
+                        session_path.unlink()
+                    except Exception:
+                        pass
             IN_FLIGHT_PHONES.discard(phone)
         return None
 
@@ -573,7 +582,7 @@ def lang_kb(lang: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=t["btn_back"], callback_data="settings")],
     ])
 
-# ── роутер (обработчики) ──────────────────────────────────────────────────
+# ── роутер ────────────────────────────────────────────────────────────────
 router = Router()
 
 @router.message(CommandStart())
