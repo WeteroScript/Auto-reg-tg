@@ -52,14 +52,16 @@ AUTHORIZED_FILE = DATA_DIR / "authorized.json"
 STATS_FILE = DATA_DIR / "stats.json"
 DEAD_FILE = DATA_DIR / "dead_numbers.json"
 
-# ── 6 рабочих сайтов ──────────────────────────────────────────────────────
+# ── 7 рабочих сайтов ──────────────────────────────────────────────────────
 SITES: list[tuple[str, str]] = [
-    ("Receive-SMS.io", "https://receive-sms.io/"),
     ("asms.ai", "https://asms.ai/"),
-    ("Receive-SMS.cc", "https://receive-sms.cc/"),
+    ("SMSToMe", "https://smstome.com/"),
     ("Temporary-Phone-Number", "https://temporary-phone-number.com/"),
+    ("receive-smss", "https://receive-smss.com/"),
+    ("FreePhoneNum", "https://freephonenum.com/"),
+    ("TempNumber", "https://temp-number.com/"),
+    ("Receive-SMS.io", "https://receive-sms.io/"),
     ("Receive-SMS-Free", "https://receive-sms-free.cc/"),
-    ("SMSReceive.live", "https://smsreceive.live/free-gb-phone-number"),
 ]
 
 SMS_WAIT = 60
@@ -74,95 +76,49 @@ IN_FLIGHT_PHONES: set[str] = set()
 LAST_SEEN_PHONE: dict[str, str] = {}
 SITE_LOCKS: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name, _ in SITES}
 
-# ── переводы ──────────────────────────────────────────────────────────────
+# ── переводы (сокращенно) ─────────────────────────────────────────────────
 TRANSLATIONS = {
     "ru": {
         "enter_password": "🔐 <b>Добро пожаловать!</b>\n\nВведите пароль для доступа к панели:",
         "wrong_password": "❌ Неверный пароль. Попробуйте снова.",
-        "menu": (
-            "🏠 <b>Главное меню</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "👋 Привет! Я помогаю автоматизировать регистрацию аккаунтов Telegram "
-            "на публичных временных номерах.\n\n"
-            "📊 <b>Текущее состояние:</b>\n"
-            "  👤 Аккаунтов создано: <b>{accounts}</b>\n"
-            "  🌐 Сайтов в работе: <b>{limit}</b> из <b>{total}</b>\n"
-            "  💀 Мёртвых номеров: <b>{dead}</b>\n\n"
-            "Выберите действие:"
-        ),
-        "btn_start": "🚀 Запустить регистрацию",
-        "btn_stop": "🛑 Остановить регистрацию",
-        "btn_accounts": "👤 Аккаунты",
-        "btn_stats": "📊 Статистика",
-        "btn_logs": "📄 Логи",
-        "btn_settings": "⚙️ Настройки",
+        "menu": "🏠 <b>Главное меню</b>\n👤 Аккаунтов: <b>{accounts}</b>\n🌐 Сайтов: <b>{limit}/{total}</b>\n💀 Мёртвых: <b>{dead}</b>",
+        "btn_start": "🚀 Запустить", "btn_stop": "🛑 Остановить",
+        "btn_accounts": "👤 Аккаунты", "btn_stats": "📊 Статистика", "btn_logs": "📄 Логи", "btn_settings": "⚙️ Настройки",
         "btn_back": "⬅️ Назад",
-        "reg_started": "🚀 <b>Регистрация запущена!</b>\n━━━━━━━━━━━━━━━━━━━━\n🔄 Потоков: <b>{workers}</b>\n🌐 Сайтов: <b>{limit}</b>\n\n⏳ Жду первый аккаунт...",
-        "reg_stopped": "🛑 <b>Регистрация остановлена</b>",
-        "reg_already": "⚠️ Регистрация уже идёт.",
-        "reg_not_running": "ℹ️ Регистрация не запущена.",
-        "reg_no_sites": "⚠️ Список сайтов пуст.",
-        "account_created_notify": "🎉 <b>Аккаунт создан!</b>\n📱 <code>{phone}</code>\n🆔 <code>{uid}</code>\n📛 {name}\n🌐 {site}\n🔑 2FA: <code>{password}</code>\n\n👤 Всего: <b>{total}</b>",
-        "no_accounts": "👤 <b>Аккаунтов пока нет</b>",
-        "accounts_title": "👤 <b>Аккаунты</b>\nВыберите номер:",
+        "reg_started": "🚀 <b>Регистрация запущена!</b>\n🔄 Потоков: <b>{workers}</b>\n🌐 Сайтов: <b>{limit}</b>",
+        "reg_stopped": "🛑 <b>Остановлена</b>", "reg_already": "⚠️ Уже идёт.", "reg_not_running": "ℹ️ Не запущена.", "reg_no_sites": "⚠️ Нет сайтов.",
+        "account_created_notify": "🎉 <b>Создан!</b>\n📱 <code>{phone}</code>\n🆔 <code>{uid}</code>\n📛 {name}\n🌐 {site}\n🔑 2FA: <code>{password}</code>",
+        "no_accounts": "👤 Нет аккаунтов.", "accounts_title": "👤 <b>Аккаунты</b>",
         "account_detail": "👤 <b>Аккаунт</b>\n📱 <code>{phone}</code>\n📨 Кодов: <b>{codes}</b>\n🕐 {created}",
-        "btn_get_codes": "📨 Коды SMS",
-        "btn_get_2fa": "🔑 2FA пароль",
-        "codes_list": "📨 <b>Коды для {phone}</b>\n{codes}",
-        "codes_empty": "📭 Кодов нет.",
-        "account_2fa": "🔑 <b>2FA пароль</b>\n📱 {phone}\n🔑 <code>{password}</code>",
-        "no_2fa": "⚠️ 2FA не установлен.",
-        "stats_text": "📊 <b>Статистика</b>\n✅ Аккаунтов: {created}\n📨 Запрошено: {requested}\n❌ Неверных: {invalid}\n💀 Мёртвых: {dead}\n🕐 {now}",
+        "btn_get_codes": "📨 Коды", "btn_get_2fa": "🔑 2FA",
+        "codes_list": "📨 <b>{phone}</b>\n{codes}", "codes_empty": "📭 Нет кодов.",
+        "account_2fa": "🔑 <b>2FA</b>\n📱 {phone}\n🔑 <code>{password}</code>", "no_2fa": "⚠️ Нет 2FA.",
+        "stats_text": "📊 <b>Статистика</b>\n✅ Создано: {created}\n📨 Запрошено: {requested}\n❌ Неверных: {invalid}\n💀 Мёртвых: {dead}\n🕐 {now}",
         "settings": "⚙️ <b>Настройки</b>\n🌐 Язык: <b>{lang}</b>\n🔢 Сайтов: <b>{limit}</b>",
-        "btn_sites": "🔢 Кол-во сайтов",
-        "btn_lang": "🌐 Язык",
-        "enter_site_limit": "Введите число от 1 до {max}:",
-        "invalid_number": "⚠️ 1–{max}.",
-        "limit_updated": "✅ Лимит: <b>{limit}</b>",
-        "lang_updated": "✅ Язык: <b>{lang}</b>",
-        "logs_sent": "📄 Логи.",
-        "no_logs": "📭 Нет логов.",
-        "logout_done": "👋 Вы вышли.",
-        "choose_lang": "🌐 Выберите язык:",
+        "btn_sites": "🔢 Сайты", "btn_lang": "🌐 Язык", "enter_site_limit": "1–{max}:",
+        "invalid_number": "⚠️ 1–{max}.", "limit_updated": "✅ <b>{limit}</b>", "lang_updated": "✅ <b>{lang}</b>",
+        "logs_sent": "📄 Логи.", "no_logs": "📭 Пусто.", "logout_done": "👋 Выход.", "choose_lang": "🌐 Язык:",
     },
     "en": {
-        "enter_password": "🔐 <b>Welcome!</b>\n\nEnter password:",
+        "enter_password": "🔐 <b>Welcome!</b>\n\nPassword:",
         "wrong_password": "❌ Wrong password.",
-        "menu": "🏠 <b>Main menu</b>\n👤 Accounts: <b>{accounts}</b>\n🌐 Sites: <b>{limit}/{total}</b>\n💀 Dead: <b>{dead}</b>",
-        "btn_start": "🚀 Start",
-        "btn_stop": "🛑 Stop",
-        "btn_accounts": "👤 Accounts",
-        "btn_stats": "📊 Stats",
-        "btn_logs": "📄 Logs",
-        "btn_settings": "⚙️ Settings",
+        "menu": "🏠 <b>Menu</b>\n👤 Accounts: <b>{accounts}</b>\n🌐 Sites: <b>{limit}/{total}</b>\n💀 Dead: <b>{dead}</b>",
+        "btn_start": "🚀 Start", "btn_stop": "🛑 Stop",
+        "btn_accounts": "👤 Accounts", "btn_stats": "📊 Stats", "btn_logs": "📄 Logs", "btn_settings": "⚙️ Settings",
         "btn_back": "⬅️ Back",
-        "reg_started": "🚀 <b>Started!</b>\n🔄 Workers: <b>{workers}</b>\n🌐 Sites: <b>{limit}</b>",
-        "reg_stopped": "🛑 <b>Stopped</b>",
-        "reg_already": "⚠️ Already running.",
-        "reg_not_running": "ℹ️ Not running.",
-        "reg_no_sites": "⚠️ Empty.",
-        "account_created_notify": "🎉 <b>Created!</b>\n📱 <code>{phone}</code>\n🆔 <code>{uid}</code>\n📛 {name}\n🌐 {site}\n🔑 2FA: <code>{password}</code>\n👤 <b>{total}</b>",
-        "no_accounts": "👤 <b>No accounts</b>",
-        "accounts_title": "👤 <b>Accounts</b>",
-        "account_detail": "👤 <b>Account</b>\n📱 <code>{phone}</code>\n📨 Codes: <b>{codes}</b>\n🕐 {created}",
-        "btn_get_codes": "📨 Codes",
-        "btn_get_2fa": "🔑 2FA",
-        "codes_list": "📨 <b>{phone}</b>\n{codes}",
-        "codes_empty": "📭 No codes.",
-        "account_2fa": "🔑 <b>2FA</b>\n📱 {phone}\n🔑 <code>{password}</code>",
-        "no_2fa": "⚠️ No 2FA.",
+        "reg_started": "🚀 <b>Started!</b>",
+        "reg_stopped": "🛑 <b>Stopped</b>", "reg_already": "⚠️ Running.", "reg_not_running": "ℹ️ Not running.", "reg_no_sites": "⚠️ Empty.",
+        "account_created_notify": "🎉 <b>Created!</b>\n📱 {phone}\n🆔 {uid}\n📛 {name}\n🌐 {site}\n🔑 {password}",
+        "no_accounts": "👤 No accounts.", "accounts_title": "👤 <b>Accounts</b>",
+        "account_detail": "👤 <b>Account</b>\n📱 {phone}\n📨 Codes: {codes}\n🕐 {created}",
+        "btn_get_codes": "📨 Codes", "btn_get_2fa": "🔑 2FA",
+        "codes_list": "📨 {phone}\n{codes}", "codes_empty": "📭 Empty.",
+        "account_2fa": "🔑 {phone}\n<code>{password}</code>", "no_2fa": "⚠️ No 2FA.",
         "stats_text": "📊 <b>Stats</b>\n✅ {created}\n📨 {requested}\n❌ {invalid}\n💀 {dead}\n🕐 {now}",
         "settings": "⚙️ <b>Settings</b>\n🌐 {lang}\n🔢 {limit}",
-        "btn_sites": "🔢 Sites",
-        "btn_lang": "🌐 Lang",
-        "enter_site_limit": "1–{max}:",
-        "invalid_number": "⚠️ 1–{max}.",
-        "limit_updated": "✅ <b>{limit}</b>",
-        "lang_updated": "✅ <b>{lang}</b>",
-        "logs_sent": "📄 Logs.",
-        "no_logs": "📭 No logs.",
-        "logout_done": "👋 Out.",
-        "choose_lang": "🌐 Choose:",
+        "btn_sites": "🔢 Sites", "btn_lang": "🌐 Lang", "enter_site_limit": "1–{max}:",
+        "invalid_number": "⚠️ 1–{max}.", "limit_updated": "✅ {limit}", "lang_updated": "✅ {lang}",
+        "logs_sent": "📄 Logs.", "no_logs": "📭 Empty.", "logout_done": "👋 Out.", "choose_lang": "🌐 Choose:",
     },
 }
 
@@ -214,7 +170,7 @@ def add_code_to_account(phone: str, code: str):
         if a["phone"] == phone: a["codes"].append(code); break
     save_accounts(accounts)
 
-# ── парсинг номера ────────────────────────────────────────────────────────
+# ── парсинг номеров ───────────────────────────────────────────────────────
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
@@ -256,18 +212,43 @@ def parse_age_hours(text: str) -> float:
 def extract_phone_and_url(html: str) -> tuple[str | None, str | None]:
     soup = BeautifulSoup(html, "lxml")
     
+    # 1. FreePhoneNum
+    if "FreePhoneNum" in html or "Copy number" in html:
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if re.search(r"/\d{7,12}$", href) or "/sms/" in href or "/numbers/" in href:
+                txt = a.get_text(" ", strip=True)
+                m = STRICT_PHONE_RE.search(txt) or STRICT_PHONE_RE.search(href)
+                if m:
+                    p = normalize_phone(m.group(0))
+                    if p: return p, href
+
+    # 2. receive-smss.com
     for card in soup.find_all(["div", "article", "li"]):
         text = card.get_text(" ", strip=True)
-        if "USA" in text or "UK" in text or "Finland" in text:
+        if "United States" in text or "United Kingdom" in text:
+            m = STRICT_PHONE_RE.search(text)
+            if m:
+                phone = normalize_phone(m.group(0))
+                if phone:
+                    link = card.find("a", string=re.compile("Open", re.I))
+                    if link: return phone, link.get("href")
+                    return phone, None
+
+    # 3. Receive-SMS.io, SMSToMe, TempNumber
+    for card in soup.find_all(["div", "article", "li"]):
+        text = card.get_text(" ", strip=True)
+        if "UK" in text or "United Kingdom" in text or "GB" in text or "+44" in text:
+            continue
+        if "USA" in text or "Finland" in text or "Belgium" in text or "Netherlands" in text or "Poland" in text or "Canada" in text or "Fi" in text:
             age_hours = 9999
-            time_match = re.search(r"Added:\s*([^|]+)", text, re.I)
+            time_match = re.search(r"Added:\s*([^|]+)|Added\s+(\d+\s+\w+\s+ago)", text, re.I)
             if time_match:
-                age_hours = parse_age_hours(time_match.group(1))
-            elif "recently" in text.lower():
-                age_hours = 0.1
+                age_str = time_match.group(1) or time_match.group(2)
+                age_hours = parse_age_hours(age_str)
+            elif "recently" in text.lower(): age_hours = 0.1
             
-            if age_hours > MAX_NUMBER_AGE_HOURS:
-                continue
+            if age_hours > MAX_NUMBER_AGE_HOURS: continue
                 
             m = STRICT_PHONE_RE.search(text)
             if m:
@@ -277,18 +258,7 @@ def extract_phone_and_url(html: str) -> tuple[str | None, str | None]:
                     href = link["href"] if link else None
                     return phone, href
 
-    for card in soup.find_all(["div", "article", "li"]):
-        text = card.get_text(" ", strip=True)
-        if "View SMS" in text or "United Kingdom" in text:
-            m = STRICT_PHONE_RE.search(text)
-            if m:
-                phone = normalize_phone(m.group(0))
-                if phone:
-                    link = card.find("a", href=True)
-                    if link: return phone, link["href"]
-                    parent_link = card.find_parent("a")
-                    if parent_link: return phone, parent_link["href"]
-
+    # 4. Универсальный фолбэк (asms.ai, Temporary-Phone-Number)
     for a in soup.find_all("a", href=True):
         href = a["href"]
         if any(x in href for x in ("/number/", "/sms/", "/inbox/")):
@@ -309,11 +279,7 @@ def extract_phone_and_url(html: str) -> tuple[str | None, str | None]:
     return None, None
 
 # ── парсинг кода ──────────────────────────────────────────────────────────
-CODE_CONTEXT_RE = re.compile(
-    r"(?:Telegram|telegram|TELEGRAM|код|Код|КОД|code|Code|CODE|"
-    r"login|Login|verification|Verification|passcode|G-|#)"
-    r"[^\d]{0,60}?(\d{5,6})(?!\d)"
-)
+CODE_CONTEXT_RE = re.compile(r"(?:Telegram|telegram|код|code|Code|CODE|verification|passcode|G-|#)[^\d]{0,60}?(\d{5,6})(?!\d)")
 CODE_PAREN_RE = re.compile(r"[\(\[]\s*(\d{5,6})\s*[\)\]]")
 
 def snapshot_page(html: str) -> str:
@@ -322,12 +288,32 @@ def snapshot_page(html: str) -> str:
 
 def extract_code_from_sms_block(html: str) -> str | None:
     soup = BeautifulSoup(html, "lxml")
+    
+    # FreePhoneNum: кнопка Copy code
+    for btn in soup.find_all(string=re.compile("Copy code", re.I)):
+        parent = btn.parent.parent
+        if parent:
+            text = parent.get_text(" ", strip=True).replace("Copy code", "")
+            m = re.search(r"\b(\d{5,6})\b", text)
+            if m: return m.group(1)
+
+    # receive-smss.com: блоки Message/Sender
+    for div in soup.find_all(["div", "li", "tr"]):
+        text = div.get_text(" ", strip=True)
+        if "Message" in text and "Sender" in text and "telegram" in text.lower():
+            m = re.search(r"\b(\d{3}[- ]?\d{3})\b|\b(\d{5,6})\b", text)
+            if m:
+                code = m.group(1) or m.group(2)
+                return code.replace("-", "").replace(" ", "")
+
+    # Универсальный
     for selector in ("[class*=sms]", "[class*=message]", "[class*=inbox]", "[class*=msg]", "[class*=text]", "tr", "li"):
         for el in soup.select(selector):
             txt = el.get_text(" ", strip=True)
             if "telegram" in txt.lower() or "код" in txt.lower():
                 m = re.search(r"(?:Telegram|code|код|G-)[^\d]{0,40}?(\d{5,6})(?!\d)", txt, re.I)
                 if m: return m.group(1)
+                
     return None
 
 # ── HTTP ──────────────────────────────────────────────────────────────────
@@ -382,7 +368,8 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot
             return None
 
         if LAST_SEEN_PHONE.get(name) == phone:
-            log_event("info", f"{name}: номер {phone} не изменился, жду обновления")
+            log_event("info", f"{name}: номер {phone} не изменился, пауза 3 мин")
+            await asyncio.sleep(180)
             return None
         LAST_SEEN_PHONE[name] = phone
 
@@ -412,7 +399,6 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot
         session_file = f"data/session_{phone.lstrip('+')}"
         client = TelegramClient(session_file, TG_API_ID, TG_API_HASH)
         
-        # Флаг успеха
         is_success = False
         
         try:
@@ -443,7 +429,7 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot
                 log_event("warn", f"{name}: 2FA не установлен — {type(e).__name__}: {e}")
                 pwd_2fa = None
 
-            is_success = True  # <--- УСПЕХ, СЕССИЮ НЕ УДАЛЯЕМ
+            is_success = True
             
             log_event("success", f"{name}: аккаунт создан id={me.id} phone={phone}")
             increment_stat("accounts_created")
@@ -490,19 +476,14 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot
         except Exception as e:
             log_event("error", f"{name}: {type(e).__name__}: {e}")
         finally:
-            try: 
-                await client.disconnect()
-            except Exception: 
-                pass
+            try: await client.disconnect()
+            except Exception: pass
             
-            # Автоудаление мусорного файла сессии
             if not is_success:
                 session_path = Path(f"{session_file}.session")
                 if session_path.exists():
-                    try:
-                        session_path.unlink()
-                    except Exception:
-                        pass
+                    try: session_path.unlink()
+                    except Exception: pass
             IN_FLIGHT_PHONES.discard(phone)
         return None
 
@@ -815,9 +796,9 @@ async def cb_stop_reg(call: CallbackQuery):
 # ── запуск ────────────────────────────────────────────────────────────────
 async def main():
     if not BOT_TOKEN:
-        raise SystemExit("BOT_TOKEN не задан в переменных окружения")
+        raise SystemExit("BOT_TOKEN не задан")
     if not TG_API_HASH:
-        raise SystemExit("TG_API_HASH не задан в переменных окружения")
+        raise SystemExit("TG_API_HASH не задан")
     log_event("info", "Бот запущен")
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
