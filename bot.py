@@ -1,5 +1,5 @@
 # language: Python, file: bot.py, target: aiogram 3.x + Telethon + Playwright
-# pip install -r requirements.txt && playwright install chromium && playwright install-deps chromium
+# pip install -r requirements.txt && playwright install chromium chromium-headless-shell && playwright install-deps chromium
 
 import asyncio
 import json
@@ -55,7 +55,6 @@ SELECTORS_FILE = DATA_DIR / "selectors.json"
 DEAD_SITES_FILE = DATA_DIR / "dead_sites.json"
 SITE_FAILS_FILE = DATA_DIR / "site_fails.json"
 
-# ── 70 сайтов ────────────────────────────────────────────────────────────
 SITES: list[tuple[str, str]] = [
     ("asms.ai", "https://asms.ai/"),
     ("Receive-SMS-Free", "https://receive-sms-free.cc/"),
@@ -132,8 +131,8 @@ SITES: list[tuple[str, str]] = [
 
 SMS_WAIT = 90
 SMS_POLL_INTERVAL = 7
-MAX_CONCURRENT_SITES = 2
-WORKER_SLEEP_BETWEEN = 3
+MAX_CONCURRENT_SITES = 1          # критично для 800 МБ RAM
+WORKER_SLEEP_BETWEEN = 5
 FLOOD_THRESHOLD = 3600
 MAX_SITE_FAILS = 50
 FETCH_TIMEOUT = 45000
@@ -147,7 +146,7 @@ PW: Playwright | None = None
 BROWSER: Browser | None = None
 
 
-# ── переводы (сокращенно) ─────────────────────────────────────────────────
+# ── переводы ──────────────────────────────────────────────────────────────
 TRANSLATIONS = {
     "ru": {
         "enter_password": "🔐 <b>Добро пожаловать!</b>\n\nВведите пароль:",
@@ -172,14 +171,17 @@ TRANSLATIONS = {
     },
 }
 
+
 # ── JSON helpers ──────────────────────────────────────────────────────────
 def _load_json(path: Path, default):
     if not path.exists(): return default
     try: return json.loads(path.read_text(encoding="utf-8"))
     except Exception: return default
 
+
 def _save_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
 
 def load_accounts() -> list[dict]: return _load_json(ACCOUNTS_FILE, [])
 def save_accounts(accounts: list[dict]): _save_json(ACCOUNTS_FILE, accounts)
@@ -204,29 +206,32 @@ def is_dead(phone: str) -> bool: return phone in load_dead()
 def mark_dead(phone: str, reason: str):
     data = load_dead(); data[phone] = {"reason": reason, "ts": datetime.utcnow().isoformat() + "Z"}; save_dead(data)
 
+
 def load_dead_sites() -> set[str]: return set(_load_json(DEAD_SITES_FILE, []))
 def save_dead_sites(sites: set[str]): _save_json(DEAD_SITES_FILE, sorted(sites))
-
 def mark_site_dead(site: str):
     dead = load_dead_sites(); dead.add(site); save_dead_sites(dead)
     log_event("warn", f"{site}: отправлен в ЧС после {MAX_SITE_FAILS} ошибок")
 
+
 def load_site_fails() -> dict: return _load_json(SITE_FAILS_FILE, {})
 def save_site_fails(data: dict): _save_json(SITE_FAILS_FILE, data)
-
 def increment_site_fail(site: str):
     data = load_site_fails(); data[site] = data.get(site, 0) + 1; save_site_fails(data)
     if data[site] >= MAX_SITE_FAILS: mark_site_dead(site)
+
 
 def log_event(level: str, message: str):
     logs = load_logs()
     logs.append({"ts": datetime.utcnow().isoformat() + "Z", "level": level, "message": message})
     save_logs(logs)
 
+
 def add_account(phone: str, session_file: str, password_2fa: str | None = None) -> dict:
     accounts = load_accounts()
     entry = {"phone": phone, "session": session_file, "codes": [], "password_2fa": password_2fa, "created": datetime.utcnow().isoformat() + "Z"}
     accounts.append(entry); save_accounts(accounts); return entry
+
 
 def add_code_to_account(phone: str, code: str):
     accounts = load_accounts()
@@ -234,25 +239,30 @@ def add_code_to_account(phone: str, code: str):
         if a["phone"] == phone: a["codes"].append(code); break
     save_accounts(accounts)
 
+
 # ── селекторы ────────────────────────────────────────────────────────────
 FORBIDDEN_TAGS = {"script", "style", "html", "head", "body", "main", "nav", "header", "footer"}
 
+
 def load_selectors() -> dict: return _load_json(SELECTORS_FILE, {})
 def save_selectors(data: dict): _save_json(SELECTORS_FILE, data)
+
 
 def remember_selector(site: str, selector: str):
     data = load_selectors(); data[site] = selector; save_selectors(data)
     log_event("info", f"{site}: запомнил селектор {selector}")
 
+
 def get_selector(site: str) -> str | None: return load_selectors().get(site)
+
 
 def build_selector(tag) -> str | None:
     if tag.name in FORBIDDEN_TAGS: return None
     if tag.get("id"): return f"{tag.name}#{tag['id']}"
     classes = tag.get("class")
-    if classes:
-        return f"{tag.name}.{classes[0]}"
+    if classes: return f"{tag.name}.{classes[0]}"
     return tag.name
+
 
 # ── парсинг номера ────────────────────────────────────────────────────────
 STRICT_PHONE_RE = re.compile(
@@ -272,11 +282,13 @@ STRICT_PHONE_RE = re.compile(
     r"[\s\-]?\d{2,4}[\s\-]?\d{3,4}[\s\-]?\d{3,4}"
 )
 
+
 def normalize_phone(raw: str) -> str | None:
     digits = re.sub(r"[^\d+]", "", raw)
     if digits.startswith("+"): digits = digits[1:]
     if len(digits) < 9 or len(digits) > 15 or digits.startswith("0"): return None
     return "+" + digits
+
 
 def extract_phone_and_url(html: str) -> tuple[str | None, str | None]:
     soup = BeautifulSoup(html, "lxml")
@@ -305,6 +317,7 @@ def extract_phone_and_url(html: str) -> tuple[str | None, str | None]:
         p = normalize_phone(m.group(0))
         if p: return p, None
     return None, None
+
 
 # ── самообучающийся код ──────────────────────────────────────────────────
 def extract_code_smart(html: str, site: str | None = None) -> str | None:
@@ -337,12 +350,57 @@ def extract_code_smart(html: str, site: str | None = None) -> str | None:
         if selector: remember_selector(site, selector)
     return code
 
-# ── Playwright fetch ──────────────────────────────────────────────────────
+
+# ── Playwright watchdog ───────────────────────────────────────────────────
+PLAYWRIGHT_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-sync",
+    "--disable-translate",
+    "--metrics-recording-only",
+    "--mute-audio",
+    "--no-first-run",
+    "--safebrowsing-disable-auto-update",
+    "--disable-accelerated-2d-canvas",
+    "--disable-accelerated-video-decode",
+]
+
+
+async def ensure_browser():
+    global BROWSER, PW
+    if BROWSER is not None and BROWSER.is_connected():
+        return
+    log_event("info", "Playwright упал или не запущен, перезапускаю...")
+    try:
+        if BROWSER:
+            await BROWSER.close()
+    except Exception:
+        pass
+    if PW is None:
+        PW = await async_playwright().start()
+    BROWSER = await PW.chromium.launch(headless=True, args=PLAYWRIGHT_ARGS)
+
+
 async def fetch_html(url: str, wait_until: str = "domcontentloaded", timeout: int = FETCH_TIMEOUT) -> str | None:
+    await ensure_browser()
     if BROWSER is None: return None
     page = None
     try:
         page = await BROWSER.new_page()
+
+        async def route_filter(route):
+            rt = route.request.resource_type
+            if rt in ("image", "media", "font", "stylesheet"):
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await page.route("**/*", route_filter)
         await page.goto(url, wait_until=wait_until, timeout=timeout)
         await page.wait_for_timeout(2500)
         return await page.content()
@@ -354,6 +412,7 @@ async def fetch_html(url: str, wait_until: str = "domcontentloaded", timeout: in
             try: await page.close()
             except Exception: pass
 
+
 async def wait_for_code(url: str, site: str, timeout: int = SMS_WAIT, interval: int = SMS_POLL_INTERVAL) -> str | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -364,10 +423,12 @@ async def wait_for_code(url: str, site: str, timeout: int = SMS_WAIT, interval: 
         if code: return code
     return None
 
+
 # ── 2FA и регистрация ─────────────────────────────────────────────────────
 def gen_2fa_password() -> str:
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(12))
+
 
 async def try_site(name: str, url: str, bot: Bot, user_id: int) -> dict | None:
     lock = SITE_LOCKS[name]
@@ -448,6 +509,7 @@ async def try_site(name: str, url: str, bot: Bot, user_id: int) -> dict | None:
             IN_FLIGHT_PHONES.discard(phone)
         return None
 
+
 # ── воркеры ───────────────────────────────────────────────────────────────
 async def worker(bot: Bot, user_id: int, targets: list[tuple[str, str]], worker_id: int):
     idx = worker_id % len(targets) if targets else 0
@@ -461,6 +523,7 @@ async def worker(bot: Bot, user_id: int, targets: list[tuple[str, str]], worker_
         try: await asyncio.sleep(WORKER_SLEEP_BETWEEN)
         except asyncio.CancelledError: raise
 
+
 async def registration_main(bot: Bot, user_id: int, targets: list[tuple[str, str]]):
     workers = [asyncio.create_task(worker(bot, user_id, targets, i)) for i in range(MAX_CONCURRENT_SITES)]
     try: await asyncio.gather(*workers)
@@ -471,15 +534,18 @@ async def registration_main(bot: Bot, user_id: int, targets: list[tuple[str, str
             except: pass
         raise
 
+
 # ── FSM ───────────────────────────────────────────────────────────────────
 class Auth(StatesGroup): waiting_password = State()
 class SettingsFSM(StatesGroup): waiting_limit = State()
+
 
 # ── клавиатуры ────────────────────────────────────────────────────────────
 def menu_text() -> str:
     s = load_settings()
     return TRANSLATIONS["ru"]["menu"].format(
         accounts=len(load_accounts()), limit=s["site_limit"], total=len(SITES), dead_sites=len(load_dead_sites()))
+
 
 def main_menu_kb(running: bool = False) -> InlineKeyboardMarkup:
     t = TRANSLATIONS["ru"]; rows = []
@@ -489,11 +555,14 @@ def main_menu_kb(running: bool = False) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text=t["btn_logs"], callback_data="logs"), InlineKeyboardButton(text=t["btn_settings"], callback_data="settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
 def stop_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=TRANSLATIONS["ru"]["btn_stop"], callback_data="stop_reg")]])
 
+
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=TRANSLATIONS["ru"]["btn_back"], callback_data="menu")]])
+
 
 def accounts_kb(accounts: list[dict]) -> InlineKeyboardMarkup:
     t = TRANSLATIONS["ru"]; rows = []
@@ -501,6 +570,7 @@ def accounts_kb(accounts: list[dict]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text=f"{a['phone']} · {len(a['codes'])}", callback_data=f"acc:{i}")])
     rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def account_detail_kb(idx: int) -> InlineKeyboardMarkup:
     t = TRANSLATIONS["ru"]
@@ -510,12 +580,14 @@ def account_detail_kb(idx: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=t["btn_back"], callback_data="accounts")],
     ])
 
+
 def settings_kb() -> InlineKeyboardMarkup:
     t = TRANSLATIONS["ru"]
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_sites"], callback_data="set_limit"), InlineKeyboardButton(text=t["btn_lang"], callback_data="set_lang")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data="menu")],
     ])
+
 
 def lang_kb() -> InlineKeyboardMarkup:
     t = TRANSLATIONS["ru"]
@@ -524,8 +596,10 @@ def lang_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=t["btn_back"], callback_data="settings")],
     ])
 
+
 # ── роутер ────────────────────────────────────────────────────────────────
 router = Router()
+
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -536,6 +610,7 @@ async def cmd_start(message: Message, state: FSMContext):
         return
     await state.set_state(Auth.waiting_password)
     await message.answer(TRANSLATIONS["ru"]["enter_password"])
+
 
 @router.message(Auth.waiting_password)
 async def check_password(message: Message, state: FSMContext):
@@ -548,17 +623,20 @@ async def check_password(message: Message, state: FSMContext):
     running = message.from_user.id in REGISTRATION_TASKS
     await message.answer(menu_text(), reply_markup=main_menu_kb(running))
 
+
 @router.message(F.text == "/logout")
 async def cmd_logout(message: Message, state: FSMContext):
     remove_authorized(message.from_user.id)
     await state.clear()
     await message.answer(TRANSLATIONS["ru"]["logout_done"])
 
+
 @router.callback_query(F.data == "menu")
 async def cb_menu(call: CallbackQuery):
     running = call.from_user.id in REGISTRATION_TASKS
     await call.message.edit_text(menu_text(), reply_markup=main_menu_kb(running))
     await call.answer()
+
 
 @router.callback_query(F.data == "accounts")
 async def cb_accounts(call: CallbackQuery):
@@ -568,6 +646,7 @@ async def cb_accounts(call: CallbackQuery):
         await call.answer(); return
     await call.message.edit_text(TRANSLATIONS["ru"]["accounts_title"], reply_markup=accounts_kb(accounts))
     await call.answer()
+
 
 @router.callback_query(F.data.startswith("acc:"))
 async def cb_account_detail(call: CallbackQuery):
@@ -580,6 +659,7 @@ async def cb_account_detail(call: CallbackQuery):
         phone=a["phone"], codes=len(a.get("codes", [])), created=a.get("created", "—"))
     await call.message.edit_text(text, reply_markup=account_detail_kb(idx))
     await call.answer()
+
 
 @router.callback_query(F.data.startswith("codes:"))
 async def cb_get_codes(call: CallbackQuery):
@@ -596,6 +676,7 @@ async def cb_get_codes(call: CallbackQuery):
     await call.message.answer(text)
     await call.answer()
 
+
 @router.callback_query(F.data.startswith("acc2fa:"))
 async def cb_acc_2fa(call: CallbackQuery):
     idx = int(call.data.split(":")[1])
@@ -608,6 +689,7 @@ async def cb_acc_2fa(call: CallbackQuery):
     await call.message.answer(TRANSLATIONS["ru"]["account_2fa"].format(phone=a["phone"], password=pwd))
     await call.answer()
 
+
 @router.callback_query(F.data == "stats")
 async def cb_stats(call: CallbackQuery):
     s = load_stats()
@@ -617,6 +699,7 @@ async def cb_stats(call: CallbackQuery):
         invalid=s.get("invalid_codes", 0), dead_sites=len(load_dead_sites()), now=now)
     await call.message.edit_text(text, reply_markup=back_kb())
     await call.answer()
+
 
 @router.callback_query(F.data == "logs")
 async def cb_logs(call: CallbackQuery):
@@ -628,6 +711,7 @@ async def cb_logs(call: CallbackQuery):
     await call.message.answer_document(FSInputFile(path, filename="logs.json"), caption=TRANSLATIONS["ru"]["logs_sent"])
     await call.answer()
 
+
 @router.callback_query(F.data == "settings")
 async def cb_settings(call: CallbackQuery):
     s = load_settings()
@@ -635,10 +719,12 @@ async def cb_settings(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=settings_kb())
     await call.answer()
 
+
 @router.callback_query(F.data == "set_lang")
 async def cb_set_lang(call: CallbackQuery):
     await call.message.edit_text(TRANSLATIONS["ru"]["choose_lang"], reply_markup=lang_kb())
     await call.answer()
+
 
 @router.callback_query(F.data.startswith("lang:"))
 async def cb_lang(call: CallbackQuery):
@@ -649,11 +735,13 @@ async def cb_lang(call: CallbackQuery):
     await call.message.edit_text(menu_text(), reply_markup=main_menu_kb())
     await call.answer(TRANSLATIONS["ru"]["lang_updated"].format(lang=lang))
 
+
 @router.callback_query(F.data == "set_limit")
 async def cb_set_limit(call: CallbackQuery, state: FSMContext):
     await state.set_state(SettingsFSM.waiting_limit)
     await call.message.edit_text(TRANSLATIONS["ru"]["enter_site_limit"].format(max=len(SITES)))
     await call.answer()
+
 
 @router.message(SettingsFSM.waiting_limit)
 async def process_limit(message: Message, state: FSMContext):
@@ -665,6 +753,7 @@ async def process_limit(message: Message, state: FSMContext):
     s = load_settings(); s["site_limit"] = val; save_settings(s)
     await state.clear()
     await message.answer(TRANSLATIONS["ru"]["limit_updated"].format(limit=val), reply_markup=settings_kb())
+
 
 @router.callback_query(F.data == "start_reg")
 async def cb_start_reg(call: CallbackQuery):
@@ -682,12 +771,15 @@ async def cb_start_reg(call: CallbackQuery):
         TRANSLATIONS["ru"]["reg_started"].format(workers=MAX_CONCURRENT_SITES, limit=len(targets)),
         reply_markup=stop_kb())
     await call.answer()
+
     async def runner():
         try: await registration_main(call.bot, user_id, targets)
         except asyncio.CancelledError: pass
         except Exception as e: log_event("error", f"runner: {e}")
         finally: REGISTRATION_TASKS.pop(user_id, None)
+
     REGISTRATION_TASKS[user_id] = asyncio.create_task(runner())
+
 
 @router.callback_query(F.data == "stop_reg")
 async def cb_stop_reg(call: CallbackQuery):
@@ -703,6 +795,7 @@ async def cb_stop_reg(call: CallbackQuery):
     await call.message.edit_text(TRANSLATIONS["ru"]["reg_stopped"], reply_markup=main_menu_kb(running=False))
     await call.answer()
 
+
 # ── запуск ────────────────────────────────────────────────────────────────
 async def main():
     global PW, BROWSER
@@ -710,16 +803,7 @@ async def main():
     if not TG_API_HASH: raise SystemExit("TG_API_HASH не задан")
     log_event("info", "Запуск Playwright...")
     PW = await async_playwright().start()
-    BROWSER = await PW.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--single-process",
-        ],
-    )
+    BROWSER = await PW.chromium.launch(headless=True, args=PLAYWRIGHT_ARGS)
     log_event("info", "Playwright готов")
     log_event("info", "Бот запущен")
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -729,6 +813,7 @@ async def main():
     finally:
         if BROWSER: await BROWSER.close()
         if PW: await PW.stop()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
