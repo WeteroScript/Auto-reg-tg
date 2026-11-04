@@ -132,16 +132,16 @@ SITES: list[tuple[str, str]] = [
 
 SMS_WAIT = 90
 SMS_POLL_INTERVAL = 7
-MAX_CONCURRENT_SITES = 3
-WORKER_SLEEP_BETWEEN = 2
+MAX_CONCURRENT_SITES = 2
+WORKER_SLEEP_BETWEEN = 3
 FLOOD_THRESHOLD = 3600
 MAX_SITE_FAILS = 50
+FETCH_TIMEOUT = 45000
 
 REGISTRATION_TASKS: dict[int, asyncio.Task] = {}
 IN_FLIGHT_PHONES: set[str] = set()
 LAST_SEEN_PHONE: dict[str, str] = {}
 SITE_LOCKS: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name, _ in SITES}
-SITE_FAILS: dict[str, int] = {}
 
 PW: Playwright | None = None
 BROWSER: Browser | None = None
@@ -204,30 +204,19 @@ def is_dead(phone: str) -> bool: return phone in load_dead()
 def mark_dead(phone: str, reason: str):
     data = load_dead(); data[phone] = {"reason": reason, "ts": datetime.utcnow().isoformat() + "Z"}; save_dead(data)
 
-def load_dead_sites() -> set[str]:
-    return set(_load_json(DEAD_SITES_FILE, []))
-
-def save_dead_sites(sites: set[str]):
-    _save_json(DEAD_SITES_FILE, sorted(sites))
+def load_dead_sites() -> set[str]: return set(_load_json(DEAD_SITES_FILE, []))
+def save_dead_sites(sites: set[str]): _save_json(DEAD_SITES_FILE, sorted(sites))
 
 def mark_site_dead(site: str):
-    dead = load_dead_sites()
-    dead.add(site)
-    save_dead_sites(dead)
+    dead = load_dead_sites(); dead.add(site); save_dead_sites(dead)
     log_event("warn", f"{site}: отправлен в ЧС после {MAX_SITE_FAILS} ошибок")
 
-def load_site_fails() -> dict:
-    return _load_json(SITE_FAILS_FILE, {})
-
-def save_site_fails(data: dict):
-    _save_json(SITE_FAILS_FILE, data)
+def load_site_fails() -> dict: return _load_json(SITE_FAILS_FILE, {})
+def save_site_fails(data: dict): _save_json(SITE_FAILS_FILE, data)
 
 def increment_site_fail(site: str):
-    data = load_site_fails()
-    data[site] = data.get(site, 0) + 1
-    save_site_fails(data)
-    if data[site] >= MAX_SITE_FAILS:
-        mark_site_dead(site)
+    data = load_site_fails(); data[site] = data.get(site, 0) + 1; save_site_fails(data)
+    if data[site] >= MAX_SITE_FAILS: mark_site_dead(site)
 
 def log_event(level: str, message: str):
     logs = load_logs()
@@ -246,6 +235,8 @@ def add_code_to_account(phone: str, code: str):
     save_accounts(accounts)
 
 # ── селекторы ────────────────────────────────────────────────────────────
+FORBIDDEN_TAGS = {"script", "style", "html", "head", "body", "main", "nav", "header", "footer"}
+
 def load_selectors() -> dict: return _load_json(SELECTORS_FILE, {})
 def save_selectors(data: dict): _save_json(SELECTORS_FILE, data)
 
@@ -255,10 +246,12 @@ def remember_selector(site: str, selector: str):
 
 def get_selector(site: str) -> str | None: return load_selectors().get(site)
 
-def build_selector(tag) -> str:
+def build_selector(tag) -> str | None:
+    if tag.name in FORBIDDEN_TAGS: return None
     if tag.get("id"): return f"{tag.name}#{tag['id']}"
     classes = tag.get("class")
-    if classes: return f"{tag.name}.{classes[0]}"
+    if classes:
+        return f"{tag.name}.{classes[0]}"
     return tag.name
 
 # ── парсинг номера ────────────────────────────────────────────────────────
@@ -331,7 +324,7 @@ def extract_code_smart(html: str, site: str | None = None) -> str | None:
     for tag in soup.find_all(string=re.compile(r"telegram|777000", re.I)):
         parent = tag.parent
         for _ in range(6):
-            if parent is None or parent.name in ("body", "html", "main"): break
+            if parent is None or parent.name in FORBIDDEN_TAGS: break
             text = parent.get_text(" ", strip=True)
             m = re.search(r"(?<![\d+])(\d{5,6})(?![\d])", text)
             if m:
@@ -339,17 +332,19 @@ def extract_code_smart(html: str, site: str | None = None) -> str | None:
             parent = parent.parent
     if not candidates: return None
     best_parent, code = candidates[-1]
-    if site: remember_selector(site, build_selector(best_parent))
+    if site:
+        selector = build_selector(best_parent)
+        if selector: remember_selector(site, selector)
     return code
 
 # ── Playwright fetch ──────────────────────────────────────────────────────
-async def fetch_html(url: str, wait_until: str = "networkidle", timeout: int = 30000) -> str | None:
+async def fetch_html(url: str, wait_until: str = "domcontentloaded", timeout: int = FETCH_TIMEOUT) -> str | None:
     if BROWSER is None: return None
     page = None
     try:
         page = await BROWSER.new_page()
         await page.goto(url, wait_until=wait_until, timeout=timeout)
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(2500)
         return await page.content()
     except Exception as e:
         log_event("warn", f"Playwright ошибка при {url}: {type(e).__name__}")
@@ -483,9 +478,8 @@ class SettingsFSM(StatesGroup): waiting_limit = State()
 # ── клавиатуры ────────────────────────────────────────────────────────────
 def menu_text() -> str:
     s = load_settings()
-    dead_sites = len(load_dead_sites())
     return TRANSLATIONS["ru"]["menu"].format(
-        accounts=len(load_accounts()), limit=s["site_limit"], total=len(SITES), dead_sites=dead_sites)
+        accounts=len(load_accounts()), limit=s["site_limit"], total=len(SITES), dead_sites=len(load_dead_sites()))
 
 def main_menu_kb(running: bool = False) -> InlineKeyboardMarkup:
     t = TRANSLATIONS["ru"]; rows = []
@@ -716,7 +710,16 @@ async def main():
     if not TG_API_HASH: raise SystemExit("TG_API_HASH не задан")
     log_event("info", "Запуск Playwright...")
     PW = await async_playwright().start()
-    BROWSER = await PW.chromium.launch(headless=True)
+    BROWSER = await PW.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--single-process",
+        ],
+    )
     log_event("info", "Playwright готов")
     log_event("info", "Бот запущен")
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
