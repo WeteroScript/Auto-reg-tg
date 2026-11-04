@@ -6,8 +6,11 @@ import json
 import os
 import re
 import time
+import secrets
+import string
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urljoin
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F, Router
@@ -49,28 +52,14 @@ AUTHORIZED_FILE = DATA_DIR / "authorized.json"
 STATS_FILE = DATA_DIR / "stats.json"
 DEAD_FILE = DATA_DIR / "dead_numbers.json"
 
-# ── рабочие сайты ─────────────────────────────────────────────────────────
+# ── 6 рабочих сайтов ──────────────────────────────────────────────────────
 SITES: list[tuple[str, str]] = [
-    ("AnonymSMS", "https://anonymsms.com/"),
+    ("Receive-SMS.io", "https://receive-sms.io/"),
     ("asms.ai", "https://asms.ai/"),
     ("Receive-SMS.cc", "https://receive-sms.cc/"),
     ("Temporary-Phone-Number", "https://temporary-phone-number.com/"),
     ("Receive-SMS-Free", "https://receive-sms-free.cc/"),
-    ("TempSMSS", "https://tempsmss.com/receive-sms-for/telegram/"),
-    ("Receive-SMS.io", "https://receive-sms.io/"),
     ("SMSReceive.live", "https://smsreceive.live/free-gb-phone-number"),
-]
-
-DEAD_SITES = [
-    "SMS24", "Receive-SMS.net", "Receive-smss", "SMS-Receive-Free",
-    "TempSMS", "SMSNumber.info", "OKSMS", "TextNow", "Tiger-SMS",
-    "SMSPool", "GetFreeSMSNumber", "ReceiveSMSOnline.net",
-    "Receive-SMS-Online.net", "SMSReceiveFree", "Jiemahao",
-    "Freephonenum", "Receive-SMS.co", "SMSTemp", "MyTempSMS",
-    "Quackr", "SMSToMe", "Sellaite", "Receive-SMS-Online.info",
-    "Temp-Number", "FreeReceiveSMS", "ReceiveSMSFree.net",
-    "SMS-Online", "7sim.net", "Receive-a-SMS", "SMSReceiveOnline",
-    "ReceiveFreeSMS", "SMS-Receive.net",
 ]
 
 SMS_WAIT = 60
@@ -78,12 +67,14 @@ SMS_POLL_INTERVAL = 5
 MAX_CONCURRENT_SITES = 5
 WORKER_SLEEP_BETWEEN = 2
 FLOOD_THRESHOLD = 3600
+MAX_NUMBER_AGE_HOURS = 5  # Максимальный возраст номера (в часах) для Receive-SMS.io
 
 REGISTRATION_TASKS: dict[int, asyncio.Task] = {}
 IN_FLIGHT_PHONES: set[str] = set()
+LAST_SEEN_PHONE: dict[str, str] = {}
 SITE_LOCKS: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name, _ in SITES}
 
-# ── переводы ──────────────────────────────────────────────────────────────
+# ── переводы (сокращенно для экономии места) ──────────────────────────────
 TRANSLATIONS = {
     "ru": {
         "enter_password": "🔐 <b>Добро пожаловать!</b>\n\nВведите пароль для доступа к панели:",
@@ -106,221 +97,121 @@ TRANSLATIONS = {
         "btn_logs": "📄 Логи",
         "btn_settings": "⚙️ Настройки",
         "btn_back": "⬅️ Назад",
-        "reg_started": (
-            "🚀 <b>Регистрация запущена!</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🔄 Работаю в фоне: <b>{workers}</b> параллельных потоков\n"
-            "🌐 Сайтов в очереди: <b>{limit}</b>\n\n"
-            "⏳ Как только аккаунт создастся — пришлю уведомление.\n"
-            "🛑 Остановить можно кнопкой ниже."
-        ),
-        "reg_stopped": "🛑 <b>Регистрация остановлена</b>\n\nВсе текущие попытки прерваны. Возвращаю в меню.",
+        "reg_started": "🚀 <b>Регистрация запущена!</b>\n━━━━━━━━━━━━━━━━━━━━\n🔄 Потоков: <b>{workers}</b>\n🌐 Сайтов: <b>{limit}</b>\n\n⏳ Жду первый аккаунт...",
+        "reg_stopped": "🛑 <b>Регистрация остановлена</b>",
         "reg_already": "⚠️ Регистрация уже идёт.",
         "reg_not_running": "ℹ️ Регистрация не запущена.",
-        "reg_no_sites": "⚠️ Список сайтов пуст — нечего обрабатывать.",
-        "account_created_notify": (
-            "🎉 <b>Аккаунт успешно создан!</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "📱 Номер: <code>{phone}</code>\n"
-            "🆔 Telegram ID: <code>{uid}</code>\n"
-            "📛 Имя: {name}\n"
-            "🌐 Источник: {site}\n\n"
-            "👤 Всего аккаунтов: <b>{total}</b>"
-        ),
-        "no_accounts": "👤 <b>Аккаунтов пока нет</b>\n\nЗапустите регистрацию в главном меню — первые аккаунты появятся здесь.",
-        "accounts_title": "👤 <b>Аккаунты</b>\n━━━━━━━━━━━━━━━━━━━━\nВыберите номер, чтобы увидеть детали:",
-        "account_detail": "👤 <b>Аккаунт</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 Номер: <code>{phone}</code>\n📨 Кодов получено: <b>{codes}</b>\n🕐 Создан: {created}",
-        "btn_get_codes": "📨 Получить код для входа",
-        "codes_list": "📨 <b>Коды для {phone}</b>\n━━━━━━━━━━━━━━━━━━━━\n{codes}",
-        "codes_empty": "📭 Кодов для этого аккаунта пока нет.",
-        "stats_text": (
-            "📊 <b>Статистика</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "✅ <b>Создано аккаунтов:</b> {created}\n"
-            "📨 <b>Запрошено кодов:</b> {requested}\n"
-            "❌ <b>Неверных кодов:</b> {invalid}\n"
-            "💀 <b>Мёртвых номеров:</b> {dead}\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🕐 Обновлено: {now}"
-        ),
-        "settings": "⚙️ <b>Настройки</b>\n━━━━━━━━━━━━━━━━━━━━\n🌐 Язык: <b>{lang}</b>\n🔢 Лимит сайтов: <b>{limit}</b>\n\nВыберите параметр для изменения:",
+        "reg_no_sites": "⚠️ Список сайтов пуст.",
+        "account_created_notify": "🎉 <b>Аккаунт создан!</b>\n📱 <code>{phone}</code>\n🆔 <code>{uid}</code>\n📛 {name}\n🌐 {site}\n🔑 2FA: <code>{password}</code>\n\n👤 Всего: <b>{total}</b>",
+        "no_accounts": "👤 <b>Аккаунтов пока нет</b>",
+        "accounts_title": "👤 <b>Аккаунты</b>\nВыберите номер:",
+        "account_detail": "👤 <b>Аккаунт</b>\n📱 <code>{phone}</code>\n📨 Кодов: <b>{codes}</b>\n🕐 {created}",
+        "btn_get_codes": "📨 Коды SMS",
+        "btn_get_2fa": "🔑 2FA пароль",
+        "codes_list": "📨 <b>Коды для {phone}</b>\n{codes}",
+        "codes_empty": "📭 Кодов нет.",
+        "account_2fa": "🔑 <b>2FA пароль</b>\n📱 {phone}\n🔑 <code>{password}</code>",
+        "no_2fa": "⚠️ 2FA не установлен.",
+        "stats_text": "📊 <b>Статистика</b>\n✅ Аккаунтов: {created}\n📨 Запрошено: {requested}\n❌ Неверных: {invalid}\n💀 Мёртвых: {dead}\n🕐 {now}",
+        "settings": "⚙️ <b>Настройки</b>\n🌐 Язык: <b>{lang}</b>\n🔢 Сайтов: <b>{limit}</b>",
         "btn_sites": "🔢 Кол-во сайтов",
-        "btn_lang": "🌐 Смена языка",
-        "enter_site_limit": "🔢 <b>Количество сайтов</b>\n\nВведите новое значение от <b>1</b> до <b>{max}</b>:",
-        "invalid_number": "⚠️ Нужно число от 1 до {max}.",
-        "limit_updated": "✅ Лимит обновлён: <b>{limit}</b>",
-        "lang_updated": "✅ Язык изменён: <b>{lang}</b>",
-        "logs_sent": "📄 Логи отправлены.",
-        "no_logs": "📭 Логов пока нет.",
-        "logout_done": "👋 Вы вышли. Пароль потребуется снова.",
-        "choose_lang": "🌐 <b>Выберите язык</b> / Choose language:",
+        "btn_lang": "🌐 Язык",
+        "enter_site_limit": "Введите число от 1 до {max}:",
+        "invalid_number": "⚠️ 1–{max}.",
+        "limit_updated": "✅ Лимит: <b>{limit}</b>",
+        "lang_updated": "✅ Язык: <b>{lang}</b>",
+        "logs_sent": "📄 Логи.",
+        "no_logs": "📭 Нет логов.",
+        "logout_done": "👋 Вы вышли.",
+        "choose_lang": "🌐 Выберите язык:",
     },
     "en": {
-        "enter_password": "🔐 <b>Welcome!</b>\n\nEnter password to access the panel:",
-        "wrong_password": "❌ Wrong password. Try again.",
-        "menu": (
-            "🏠 <b>Main menu</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "👋 Hi! I automate Telegram account registration on public temporary numbers.\n\n"
-            "📊 <b>Current state:</b>\n"
-            "  👤 Accounts created: <b>{accounts}</b>\n"
-            "  🌐 Active sites: <b>{limit}</b> of <b>{total}</b>\n"
-            "  💀 Dead numbers: <b>{dead}</b>\n\n"
-            "Choose an action:"
-        ),
-        "btn_start": "🚀 Start registration",
-        "btn_stop": "🛑 Stop registration",
+        "enter_password": "🔐 <b>Welcome!</b>\n\nEnter password:",
+        "wrong_password": "❌ Wrong password.",
+        "menu": "🏠 <b>Main menu</b>\n👤 Accounts: <b>{accounts}</b>\n🌐 Sites: <b>{limit}/{total}</b>\n💀 Dead: <b>{dead}</b>",
+        "btn_start": "🚀 Start",
+        "btn_stop": "🛑 Stop",
         "btn_accounts": "👤 Accounts",
-        "btn_stats": "📊 Statistics",
+        "btn_stats": "📊 Stats",
         "btn_logs": "📄 Logs",
         "btn_settings": "⚙️ Settings",
         "btn_back": "⬅️ Back",
-        "reg_started": (
-            "🚀 <b>Registration started!</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🔄 Running in background: <b>{workers}</b> parallel workers\n"
-            "🌐 Sites in queue: <b>{limit}</b>\n\n"
-            "⏳ I'll notify you as soon as an account is created.\n"
-            "🛑 Use the button below to stop."
-        ),
-        "reg_stopped": "🛑 <b>Registration stopped</b>\n\nAll running attempts cancelled. Returning to menu.",
-        "reg_already": "⚠️ Registration already running.",
-        "reg_not_running": "ℹ️ Registration not running.",
-        "reg_no_sites": "⚠️ Site list is empty — nothing to process.",
-        "account_created_notify": (
-            "🎉 <b>Account created!</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "📱 Phone: <code>{phone}</code>\n"
-            "🆔 Telegram ID: <code>{uid}</code>\n"
-            "📛 Name: {name}\n"
-            "🌐 Source: {site}\n\n"
-            "👤 Total accounts: <b>{total}</b>"
-        ),
-        "no_accounts": "👤 <b>No accounts yet</b>\n\nStart registration from main menu — first accounts will appear here.",
-        "accounts_title": "👤 <b>Accounts</b>\n━━━━━━━━━━━━━━━━━━━━\nSelect a number to see details:",
-        "account_detail": "👤 <b>Account</b>\n━━━━━━━━━━━━━━━━━━━━\n📱 Phone: <code>{phone}</code>\n📨 Codes received: <b>{codes}</b>\n🕐 Created: {created}",
-        "btn_get_codes": "📨 Get login code",
-        "codes_list": "📨 <b>Codes for {phone}</b>\n━━━━━━━━━━━━━━━━━━━━\n{codes}",
-        "codes_empty": "📭 No codes for this account yet.",
-        "stats_text": (
-            "📊 <b>Statistics</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "✅ <b>Accounts created:</b> {created}\n"
-            "📨 <b>Codes requested:</b> {requested}\n"
-            "❌ <b>Invalid codes:</b> {invalid}\n"
-            "💀 <b>Dead numbers:</b> {dead}\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🕐 Updated: {now}"
-        ),
-        "settings": "⚙️ <b>Settings</b>\n━━━━━━━━━━━━━━━━━━━━\n🌐 Language: <b>{lang}</b>\n🔢 Site limit: <b>{limit}</b>\n\nChoose parameter to change:",
-        "btn_sites": "🔢 Site count",
-        "btn_lang": "🌐 Change language",
-        "enter_site_limit": "🔢 <b>Site count</b>\n\nEnter new value from <b>1</b> to <b>{max}</b>:",
-        "invalid_number": "⚠️ Number must be 1–{max}.",
-        "limit_updated": "✅ Limit updated: <b>{limit}</b>",
-        "lang_updated": "✅ Language changed: <b>{lang}</b>",
-        "logs_sent": "📄 Logs sent.",
-        "no_logs": "📭 No logs yet.",
-        "logout_done": "👋 Logged out. Password required again.",
-        "choose_lang": "🌐 <b>Choose language</b> / Выберите язык:",
+        "reg_started": "🚀 <b>Started!</b>\n🔄 Workers: <b>{workers}</b>\n🌐 Sites: <b>{limit}</b>",
+        "reg_stopped": "🛑 <b>Stopped</b>",
+        "reg_already": "⚠️ Already running.",
+        "reg_not_running": "ℹ️ Not running.",
+        "reg_no_sites": "⚠️ Empty.",
+        "account_created_notify": "🎉 <b>Created!</b>\n📱 <code>{phone}</code>\n🆔 <code>{uid}</code>\n📛 {name}\n🌐 {site}\n🔑 2FA: <code>{password}</code>\n👤 <b>{total}</b>",
+        "no_accounts": "👤 <b>No accounts</b>",
+        "accounts_title": "👤 <b>Accounts</b>",
+        "account_detail": "👤 <b>Account</b>\n📱 <code>{phone}</code>\n📨 Codes: <b>{codes}</b>\n🕐 {created}",
+        "btn_get_codes": "📨 Codes",
+        "btn_get_2fa": "🔑 2FA",
+        "codes_list": "📨 <b>{phone}</b>\n{codes}",
+        "codes_empty": "📭 No codes.",
+        "account_2fa": "🔑 <b>2FA</b>\n📱 {phone}\n🔑 <code>{password}</code>",
+        "no_2fa": "⚠️ No 2FA.",
+        "stats_text": "📊 <b>Stats</b>\n✅ {created}\n📨 {requested}\n❌ {invalid}\n💀 {dead}\n🕐 {now}",
+        "settings": "⚙️ <b>Settings</b>\n🌐 {lang}\n🔢 {limit}",
+        "btn_sites": "🔢 Sites",
+        "btn_lang": "🌐 Lang",
+        "enter_site_limit": "1–{max}:",
+        "invalid_number": "⚠️ 1–{max}.",
+        "limit_updated": "✅ <b>{limit}</b>",
+        "lang_updated": "✅ <b>{lang}</b>",
+        "logs_sent": "📄 Logs.",
+        "no_logs": "📭 No logs.",
+        "logout_done": "👋 Out.",
+        "choose_lang": "🌐 Choose:",
     },
 }
 
 # ── JSON helpers ──────────────────────────────────────────────────────────
 def _load_json(path: Path, default):
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
+    if not path.exists(): return default
+    try: return json.loads(path.read_text(encoding="utf-8"))
+    except Exception: return default
 
 def _save_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def load_accounts() -> list[dict]:
-    return _load_json(ACCOUNTS_FILE, [])
-
-def save_accounts(accounts: list[dict]):
-    _save_json(ACCOUNTS_FILE, accounts)
-
-def load_logs() -> list[dict]:
-    return _load_json(LOGS_FILE, [])
-
-def save_logs(logs: list[dict]):
-    _save_json(LOGS_FILE, logs[-2000:])
-
-def load_settings() -> dict:
-    return _load_json(SETTINGS_FILE, {"language": "ru", "site_limit": len(SITES)})
-
-def save_settings(s: dict):
-    _save_json(SETTINGS_FILE, s)
-
-def load_stats() -> dict:
-    return _load_json(STATS_FILE, {"accounts_created": 0, "codes_requested": 0, "invalid_codes": 0})
-
-def save_stats(s: dict):
-    _save_json(STATS_FILE, s)
-
+def load_accounts() -> list[dict]: return _load_json(ACCOUNTS_FILE, [])
+def save_accounts(accounts: list[dict]): _save_json(ACCOUNTS_FILE, accounts)
+def load_logs() -> list[dict]: return _load_json(LOGS_FILE, [])
+def save_logs(logs: list[dict]): _save_json(LOGS_FILE, logs[-2000:])
+def load_settings() -> dict: return _load_json(SETTINGS_FILE, {"language": "ru", "site_limit": len(SITES)})
+def save_settings(s: dict): _save_json(SETTINGS_FILE, s)
+def load_stats() -> dict: return _load_json(STATS_FILE, {"accounts_created": 0, "codes_requested": 0, "invalid_codes": 0})
+def save_stats(s: dict): _save_json(STATS_FILE, s)
 def increment_stat(key: str, amount: int = 1):
-    s = load_stats()
-    s[key] = s.get(key, 0) + amount
-    save_stats(s)
-
-def load_authorized() -> dict:
-    return _load_json(AUTHORIZED_FILE, {})
-
-def save_authorized(data: dict):
-    _save_json(AUTHORIZED_FILE, data)
-
-def is_authorized(user_id: int) -> bool:
-    return str(user_id) in load_authorized()
-
+    s = load_stats(); s[key] = s.get(key, 0) + amount; save_stats(s)
+def load_authorized() -> dict: return _load_json(AUTHORIZED_FILE, {})
+def save_authorized(data: dict): _save_json(AUTHORIZED_FILE, data)
+def is_authorized(user_id: int) -> bool: return str(user_id) in load_authorized()
 def add_authorized(user_id: int):
-    data = load_authorized()
-    data[str(user_id)] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-    save_authorized(data)
-
+    data = load_authorized(); data[str(user_id)] = datetime.utcnow().isoformat() + "Z"; save_authorized(data)
 def remove_authorized(user_id: int):
-    data = load_authorized()
-    data.pop(str(user_id), None)
-    save_authorized(data)
-
-def load_dead() -> dict:
-    return _load_json(DEAD_FILE, {})
-
-def save_dead(data: dict):
-    _save_json(DEAD_FILE, data)
-
-def is_dead(phone: str) -> bool:
-    return phone in load_dead()
-
+    data = load_authorized(); data.pop(str(user_id), None); save_authorized(data)
+def load_dead() -> dict: return _load_json(DEAD_FILE, {})
+def save_dead(data: dict): _save_json(DEAD_FILE, data)
+def is_dead(phone: str) -> bool: return phone in load_dead()
 def mark_dead(phone: str, reason: str):
-    data = load_dead()
-    data[phone] = {"reason": reason, "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z"}
-    save_dead(data)
-
-def dead_count() -> int:
-    return len(load_dead())
-
+    data = load_dead(); data[phone] = {"reason": reason, "ts": datetime.utcnow().isoformat() + "Z"}; save_dead(data)
+def dead_count() -> int: return len(load_dead())
 def log_event(level: str, message: str):
     logs = load_logs()
-    logs.append({"ts": datetime.utcnow().isoformat(timespec="seconds") + "Z", "level": level, "message": message})
+    logs.append({"ts": datetime.utcnow().isoformat() + "Z", "level": level, "message": message})
     save_logs(logs)
 
-def add_account(phone: str, session_file: str) -> dict:
+def add_account(phone: str, session_file: str, password_2fa: str | None = None) -> dict:
     accounts = load_accounts()
-    entry = {"phone": phone, "session": session_file, "codes": [], "created": datetime.utcnow().isoformat(timespec="seconds") + "Z"}
-    accounts.append(entry)
-    save_accounts(accounts)
-    return entry
+    entry = {"phone": phone, "session": session_file, "codes": [], "password_2fa": password_2fa, "created": datetime.utcnow().isoformat() + "Z"}
+    accounts.append(entry); save_accounts(accounts); return entry
 
 def add_code_to_account(phone: str, code: str):
     accounts = load_accounts()
     for a in accounts:
-        if a["phone"] == phone:
-            a["codes"].append(code)
-            break
+        if a["phone"] == phone: a["codes"].append(code); break
     save_accounts(accounts)
 
 # ── парсинг номера ────────────────────────────────────────────────────────
@@ -346,79 +237,144 @@ STRICT_PHONE_RE = re.compile(
 
 def normalize_phone(raw: str) -> str | None:
     digits = re.sub(r"[^\d+]", "", raw)
-    if digits.startswith("+"):
-        digits = digits[1:]
-    if len(digits) < 9 or len(digits) > 15 or digits.startswith("0"):
-        return None
+    if digits.startswith("+"): digits = digits[1:]
+    if len(digits) < 9 or len(digits) > 15 or digits.startswith("0"): return None
     return "+" + digits
 
-def extract_phone(html: str) -> str | None:
+def parse_age_hours(text: str) -> float:
+    """Парсит '5 days ago', '3 hours ago', 'recently' в часы."""
+    t = text.lower()
+    if "recently" in t or "just now" in t or "minute" in t: return 0.1
+    match = re.search(r"(\d+)\s*(day|hour|minute|min)", t)
+    if match:
+        val = int(match.group(1))
+        unit = match.group(2)
+        if "day" in unit: return val * 24
+        if "hour" in unit or unit == "h": return val
+        if "minute" in unit or unit == "min": return val / 60
+    return 9999  # Если не распознали, считаем старым
+
+def extract_phone_and_url(html: str) -> tuple[str | None, str | None]:
+    soup = BeautifulSoup(html, "lxml")
+    
+    # 1. Специфично для Receive-SMS.io (карточки с номерами и временем)
+    for card in soup.find_all(["div", "article", "li"]):
+        text = card.get_text(" ", strip=True)
+        if "USA" in text or "UK" in text or "Finland" in text:
+            age_hours = 9999
+            time_match = re.search(r"Added:\s*([^|]+)", text, re.I)
+            if time_match:
+                age_hours = parse_age_hours(time_match.group(1))
+            elif "recently" in text.lower():
+                age_hours = 0.1
+            
+            # Если номер старше 5 часов — пропускаем
+            if age_hours > MAX_NUMBER_AGE_HOURS:
+                continue
+                
+            m = STRICT_PHONE_RE.search(text)
+            if m:
+                phone = normalize_phone(m.group(0))
+                if phone:
+                    # Ищем кнопку Open или ссылку
+                    link = card.find("a", href=True)
+                    href = link["href"] if link else None
+                    return phone, href
+
+    # 2. Специфично для SMSReceive.live (кнопка View SMS)
+    for card in soup.find_all(["div", "article", "li"]):
+        text = card.get_text(" ", strip=True)
+        if "View SMS" in text or "United Kingdom" in text:
+            m = STRICT_PHONE_RE.search(text)
+            if m:
+                phone = normalize_phone(m.group(0))
+                if phone:
+                    link = card.find("a", href=True)
+                    if link: return phone, link["href"]
+                    # если кнопка не ссылка, возможно, ссылка есть на родителе
+                    parent_link = card.find_parent("a")
+                    if parent_link: return phone, parent_link["href"]
+
+    # 3. Универсальный фолбэк (asms.ai, Receive-SMS.cc)
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if any(x in href for x in ("/number/", "/sms/", "/inbox/")):
+            txt = a.get_text(" ", strip=True)
+            m = STRICT_PHONE_RE.search(txt) or STRICT_PHONE_RE.search(href)
+            if m:
+                p = normalize_phone(m.group(0))
+                if p: return p, href
+        m = STRICT_PHONE_RE.search(href)
+        if m:
+            p = normalize_phone(m.group(0))
+            if p: return p, href
+
     for m in STRICT_PHONE_RE.finditer(html):
         p = normalize_phone(m.group(0))
-        if p:
-            return p
-    soup = BeautifulSoup(html, "lxml")
-    for a in soup.find_all("a", href=True):
-        if a["href"].startswith("tel:"):
-            p = normalize_phone(a["href"][4:])
-            if p:
-                return p
-    for attr in ("data-phone", "data-number"):
-        for tag in soup.find_all(attrs={attr: True}):
-            p = normalize_phone(tag[attr])
-            if p:
-                return p
-    return None
+        if p: return p, None
 
-# ── парсер кода ───────────────────────────────────────────────────────────
+    return None, None
+
+# ── парсинг кода ──────────────────────────────────────────────────────────
 CODE_CONTEXT_RE = re.compile(
     r"(?:Telegram|telegram|TELEGRAM|код|Код|КОД|code|Code|CODE|"
     r"login|Login|verification|Verification|passcode|G-|#)"
     r"[^\d]{0,60}?(\d{5,6})(?!\d)"
 )
 CODE_PAREN_RE = re.compile(r"[\(\[]\s*(\d{5,6})\s*[\)\]]")
-CODE_STANDALONE_RE = re.compile(r"(?<!\d)(\d{5,6})(?!\d)")
 
-def extract_code(html: str) -> str | None:
+def snapshot_page(html: str) -> str:
     soup = BeautifulSoup(html, "lxml")
-    text = soup.get_text(" ", strip=True)
-    for m in CODE_CONTEXT_RE.finditer(text):
-        return m.group(1)
-    for m in CODE_PAREN_RE.finditer(text):
-        return m.group(1)
-    matches = CODE_STANDALONE_RE.findall(text)
-    if matches:
-        return matches[0]
+    return soup.get_text(" ", strip=True)
+
+def extract_code_from_sms_block(html: str) -> str | None:
+    soup = BeautifulSoup(html, "lxml")
+    for selector in ("[class*=sms]", "[class*=message]", "[class*=inbox]", "[class*=msg]", "[class*=text]", "tr", "li"):
+        for el in soup.select(selector):
+            txt = el.get_text(" ", strip=True)
+            if "telegram" in txt.lower() or "код" in txt.lower():
+                m = re.search(r"(?:Telegram|code|код|G-)[^\d]{0,40}?(\d{5,6})(?!\d)", txt, re.I)
+                if m: return m.group(1)
     return None
 
 # ── HTTP ──────────────────────────────────────────────────────────────────
 async def fetch_html(session: aiohttp.ClientSession, url: str, timeout: int = 20) -> str | None:
     try:
         async with session.get(url, timeout=timeout) as resp:
-            if resp.status == 200:
-                return await resp.text()
-    except Exception:
-        pass
+            if resp.status == 200: return await resp.text()
+    except Exception: pass
     return None
 
-async def wait_for_code(session: aiohttp.ClientSession, url: str,
-                        timeout: int = SMS_WAIT, interval: int = SMS_POLL_INTERVAL) -> str | None:
+async def wait_for_code(session: aiohttp.ClientSession, url: str, baseline: str = "", timeout: int = SMS_WAIT, interval: int = SMS_POLL_INTERVAL) -> str | None:
     deadline = time.time() + timeout
+    seen_codes: set[str] = set()
     while time.time() < deadline:
         await asyncio.sleep(interval)
         html = await fetch_html(session, url)
-        if html:
-            code = extract_code(html)
-            if code:
-                return code
+        if not html: continue
+        code = extract_code_from_sms_block(html)
+        if code and code not in seen_codes:
+            seen_codes.add(code); return code
+        current = snapshot_page(html)
+        new_text = current.replace(baseline, "", 1) if baseline else current
+        for m in CODE_CONTEXT_RE.finditer(new_text):
+            candidate = m.group(1)
+            if candidate not in seen_codes:
+                seen_codes.add(candidate); return candidate
+        for m in CODE_PAREN_RE.finditer(new_text):
+            candidate = m.group(1)
+            if candidate not in seen_codes:
+                seen_codes.add(candidate); return candidate
     return None
 
-# ── регистрация на одном сайте ────────────────────────────────────────────
-async def try_site(name: str, url: str, session: aiohttp.ClientSession,
-                   bot: Bot, user_id: int) -> dict | None:
+# ── 2FA и регистрация ─────────────────────────────────────────────────────
+def gen_2fa_password() -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(12))
+
+async def try_site(name: str, url: str, session: aiohttp.ClientSession, bot: Bot, user_id: int) -> dict | None:
     lock = SITE_LOCKS[name]
-    if lock.locked():
-        return None
+    if lock.locked(): return None
 
     async with lock:
         log_event("info", f"{name}: старт")
@@ -427,26 +383,40 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession,
             log_event("warn", f"{name}: страница не загрузилась")
             return None
 
-        phone = extract_phone(html)
+        phone, phone_page = extract_phone_and_url(html)
         if not phone:
-            log_event("warn", f"{name}: номер не найден")
+            log_event("warn", f"{name}: номер не найден или все старше 5 часов")
             return None
+
+        if LAST_SEEN_PHONE.get(name) == phone:
+            log_event("info", f"{name}: номер {phone} не изменился, жду обновления")
+            return None
+        LAST_SEEN_PHONE[name] = phone
 
         if is_dead(phone):
             log_event("info", f"{name}: номер {phone} в blacklist, пропуск")
             return None
-
         if phone in IN_FLIGHT_PHONES:
             log_event("info", f"{name}: номер {phone} уже обрабатывается")
             return None
-
         if any(a["phone"] == phone for a in load_accounts()):
             log_event("info", f"{name}: номер {phone} уже зарегистрирован")
             return None
 
+        # Переход на страницу номера
+        if phone_page:
+            if not phone_page.startswith("http"): phone_page = urljoin(url, phone_page)
+            log_event("info", f"{name}: страница номера {phone_page}")
+            page_html = await fetch_html(session, phone_page)
+            if page_html: html = page_html
+            else: 
+                log_event("warn", f"{name}: страница номера не загрузилась (битая ссылка), скип")
+                return None  # <--- СКИП БИТЫХ НОМЕРОВ
+
         IN_FLIGHT_PHONES.add(phone)
         log_event("info", f"{name}: номер {phone}")
 
+        baseline = snapshot_page(html)
         session_file = f"data/session_{phone.lstrip('+')}"
         client = TelegramClient(session_file, TG_API_ID, TG_API_HASH)
         try:
@@ -455,7 +425,7 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession,
             increment_stat("codes_requested")
             log_event("info", f"{name}: код запрошен у Telegram")
 
-            code = await wait_for_code(session, url)
+            code = await wait_for_code(session, phone_page or url, baseline=baseline)
             if not code:
                 log_event("warn", f"{name}: SMS не пришёл")
                 return None
@@ -465,13 +435,21 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession,
             try:
                 await client.sign_in(phone, code)
             except SessionPasswordNeededError:
-                log_event("warn", f"{name}: 2FA, пропуск")
+                log_event("warn", f"{name}: 2FA на номере уже стоит, пропуск")
                 return None
 
             me = await client.get_me()
+            pwd_2fa = gen_2fa_password()
+            try:
+                await client.edit_2fa(new_password=pwd_2fa)
+                log_event("info", f"{name}: 2FA установлен для {phone}")
+            except Exception as e:
+                log_event("warn", f"{name}: 2FA не установлен — {type(e).__name__}: {e}")
+                pwd_2fa = None
+
             log_event("success", f"{name}: аккаунт создан id={me.id} phone={phone}")
             increment_stat("accounts_created")
-            add_account(phone, session_file)
+            add_account(phone, session_file, pwd_2fa)
             add_code_to_account(phone, code)
 
             try:
@@ -479,7 +457,7 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession,
                     user_id,
                     TRANSLATIONS[load_settings().get("language", "ru")]["account_created_notify"].format(
                         phone=phone, uid=me.id, name=me.first_name or "—",
-                        site=name, total=len(load_accounts()),
+                        site=name, total=len(load_accounts()), password=pwd_2fa or "не установлен",
                     ),
                 )
             except Exception as e:
@@ -498,116 +476,78 @@ async def try_site(name: str, url: str, session: aiohttp.ClientSession,
             log_event("warn", f"{name}: номер флужен → blacklist")
         except PhoneCodeInvalidError:
             increment_stat("invalid_codes")
-            log_event("warn", f"{name}: код неверный (парсер промахнулся)")
+            log_event("warn", f"{name}: код неверный")
         except PhoneCodeExpiredError:
             log_event("warn", f"{name}: код истёк")
         except ApiIdInvalidError:
-            log_event("error", f"{name}: api_id отклонён — нужен свой с my.telegram.org")
+            log_event("error", f"{name}: api_id отклонён")
         except FloodWaitError as e:
             if e.seconds >= FLOOD_THRESHOLD:
                 mark_dead(phone, f"flood_{e.seconds}s")
                 log_event("warn", f"{name}: FloodWait {e.seconds}s → blacklist")
             else:
                 log_event("warn", f"{name}: FloodWait {e.seconds}s")
-                try:
-                    await asyncio.sleep(min(e.seconds, 60))
-                except asyncio.CancelledError:
-                    raise
+                try: await asyncio.sleep(min(e.seconds, 60))
+                except asyncio.CancelledError: raise
         except Exception as e:
             log_event("error", f"{name}: {type(e).__name__}: {e}")
         finally:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+            try: await client.disconnect()
+            except Exception: pass
             IN_FLIGHT_PHONES.discard(phone)
         return None
 
 # ── воркеры ───────────────────────────────────────────────────────────────
-async def worker(bot: Bot, user_id: int, targets: list[tuple[str, str]],
-                 session: aiohttp.ClientSession, worker_id: int):
+async def worker(bot: Bot, user_id: int, targets: list[tuple[str, str]], session: aiohttp.ClientSession, worker_id: int):
     idx = worker_id % len(targets) if targets else 0
     while True:
         if not targets:
-            await asyncio.sleep(5)
-            continue
+            await asyncio.sleep(5); continue
         name, url = targets[idx % len(targets)]
         idx += 1
-        try:
-            await try_site(name, url, session, bot, user_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log_event("error", f"w{worker_id}: {type(e).__name__}: {e}")
-        try:
-            await asyncio.sleep(WORKER_SLEEP_BETWEEN)
-        except asyncio.CancelledError:
-            raise
+        try: await try_site(name, url, session, bot, user_id)
+        except asyncio.CancelledError: raise
+        except Exception as e: log_event("error", f"w{worker_id}: {type(e).__name__}: {e}")
+        try: await asyncio.sleep(WORKER_SLEEP_BETWEEN)
+        except asyncio.CancelledError: raise
 
-async def registration_main(bot: Bot, user_id: int, targets: list[tuple[str, str]],
-                            session: aiohttp.ClientSession):
-    workers = [asyncio.create_task(worker(bot, user_id, targets, session, i))
-               for i in range(MAX_CONCURRENT_SITES)]
-    try:
-        await asyncio.gather(*workers)
+async def registration_main(bot: Bot, user_id: int, targets: list[tuple[str, str]], session: aiohttp.ClientSession):
+    workers = [asyncio.create_task(worker(bot, user_id, targets, session, i)) for i in range(MAX_CONCURRENT_SITES)]
+    try: await asyncio.gather(*workers)
     except asyncio.CancelledError:
+        for w in workers: w.cancel()
         for w in workers:
-            w.cancel()
-        for w in workers:
-            try:
-                await w
-            except (asyncio.CancelledError, Exception):
-                pass
+            try: await w
+            except (asyncio.CancelledError, Exception): pass
         raise
 
 # ── FSM ───────────────────────────────────────────────────────────────────
-class Auth(StatesGroup):
-    waiting_password = State()
-
-class SettingsFSM(StatesGroup):
-    waiting_limit = State()
+class Auth(StatesGroup): waiting_password = State()
+class SettingsFSM(StatesGroup): waiting_limit = State()
 
 # ── клавиатуры ────────────────────────────────────────────────────────────
 def menu_text(lang: str) -> str:
     settings = load_settings()
-    return TRANSLATIONS[lang]["menu"].format(
-        accounts=len(load_accounts()), limit=settings["site_limit"],
-        total=len(SITES), dead=dead_count(),
-    )
+    return TRANSLATIONS[lang]["menu"].format(accounts=len(load_accounts()), limit=settings["site_limit"], total=len(SITES), dead=dead_count())
 
 def main_menu_kb(lang: str, running: bool = False) -> InlineKeyboardMarkup:
     t = TRANSLATIONS[lang]
     rows = []
-    if running:
-        rows.append([InlineKeyboardButton(text=t["btn_stop"], callback_data="stop_reg")])
-    else:
-        rows.append([InlineKeyboardButton(text=t["btn_start"], callback_data="start_reg")])
-    rows.append([
-        InlineKeyboardButton(text=t["btn_accounts"], callback_data="accounts"),
-        InlineKeyboardButton(text=t["btn_stats"], callback_data="stats"),
-    ])
-    rows.append([
-        InlineKeyboardButton(text=t["btn_logs"], callback_data="logs"),
-        InlineKeyboardButton(text=t["btn_settings"], callback_data="settings"),
-    ])
+    if running: rows.append([InlineKeyboardButton(text=t["btn_stop"], callback_data="stop_reg")])
+    else: rows.append([InlineKeyboardButton(text=t["btn_start"], callback_data="start_reg")])
+    rows.append([InlineKeyboardButton(text=t["btn_accounts"], callback_data="accounts"), InlineKeyboardButton(text=t["btn_stats"], callback_data="stats")])
+    rows.append([InlineKeyboardButton(text=t["btn_logs"], callback_data="logs"), InlineKeyboardButton(text=t["btn_settings"], callback_data="settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def stop_kb(lang: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=TRANSLATIONS[lang]["btn_stop"], callback_data="stop_reg")],
-    ])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=TRANSLATIONS[lang]["btn_stop"], callback_data="stop_reg")]])
 
 def back_kb(lang: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=TRANSLATIONS[lang]["btn_back"], callback_data="menu")],
-    ])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=TRANSLATIONS[lang]["btn_back"], callback_data="menu")]])
 
 def accounts_kb(accounts: list[dict], lang: str) -> InlineKeyboardMarkup:
     t = TRANSLATIONS[lang]
-    rows = []
-    for i, a in enumerate(accounts):
-        rows.append([InlineKeyboardButton(
-            text=f"{a['phone']} · {len(a['codes'])} кодов", callback_data=f"acc:{i}")])
+    rows = [[InlineKeyboardButton(text=f"{a['phone']} · {len(a['codes'])} кодов", callback_data=f"acc:{i}")] for i, a in enumerate(accounts)]
     rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -615,26 +555,25 @@ def account_detail_kb(idx: int, lang: str) -> InlineKeyboardMarkup:
     t = TRANSLATIONS[lang]
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_get_codes"], callback_data=f"codes:{idx}")],
+        [InlineKeyboardButton(text=t["btn_get_2fa"], callback_data=f"acc2fa:{idx}")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data="accounts")],
     ])
 
 def settings_kb(lang: str) -> InlineKeyboardMarkup:
     t = TRANSLATIONS[lang]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t["btn_sites"], callback_data="set_limit")],
-        [InlineKeyboardButton(text=t["btn_lang"], callback_data="set_lang")],
+        [InlineKeyboardButton(text=t["btn_sites"], callback_data="set_limit"), InlineKeyboardButton(text=t["btn_lang"], callback_data="set_lang")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data="menu")],
     ])
 
 def lang_kb(lang: str) -> InlineKeyboardMarkup:
     t = TRANSLATIONS[lang]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru"),
-         InlineKeyboardButton(text="🇬🇧 English", callback_data="lang:en")],
+        [InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru"), InlineKeyboardButton(text="🇬🇧 English", callback_data="lang:en")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data="settings")],
     ])
 
-# ── роутер ────────────────────────────────────────────────────────────────
+# ── роутер (обработчики) ──────────────────────────────────────────────────
 router = Router()
 
 @router.message(CommandStart())
@@ -715,6 +654,22 @@ async def cb_get_codes(call: CallbackQuery):
     text = TRANSLATIONS[lang]["codes_list"].format(
         phone=a["phone"], codes="\n".join(f"• <code>{c}</code>" for c in codes))
     await call.message.answer(text)
+    await call.answer()
+
+@router.callback_query(F.data.startswith("acc2fa:"))
+async def cb_acc_2fa(call: CallbackQuery):
+    idx = int(call.data.split(":")[1])
+    lang = load_settings().get("language", "ru")
+    accounts = load_accounts()
+    if idx >= len(accounts):
+        await call.answer("Not found", show_alert=True)
+        return
+    a = accounts[idx]
+    pwd = a.get("password_2fa")
+    if not pwd:
+        await call.answer(TRANSLATIONS[lang]["no_2fa"], show_alert=True)
+        return
+    await call.message.answer(TRANSLATIONS[lang]["account_2fa"].format(phone=a["phone"], password=pwd))
     await call.answer()
 
 @router.callback_query(F.data == "stats")
